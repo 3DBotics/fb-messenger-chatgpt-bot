@@ -1,172 +1,190 @@
-// index.js — FB Messenger Chatbot for 3DBotics (Cloud Run friendly)
-// Requirements (set in Cloud Run > Variables & Secrets):
-// MESSENGER_PAGE_TOKEN = your Page Access Token (Generate Token in Messenger API Settings)
-// VERIFY_TOKEN         = any secret phrase you choose (use the same in Meta "Verify token")
-// OPENAI_API_KEY       = (optional) to use AI fallback
-// META_APP_SECRET      = (optional) adds signature verification
+// index.js — 3DBotics Messenger Bot (stable, anti-loop, intents + Tech Dojo context)
+// Node 18+ (Cloud Run). No extra deps beyond express.
+// ENV required: MESSENGER_PAGE_TOKEN, VERIFY_TOKEN, OPENAI_API_KEY (optional)
 
 const express = require("express");
 const crypto = require("crypto");
 
+// ---------- ENV ----------
+const PAGE_TOKEN   = process.env.MESSENGER_PAGE_TOKEN;  // from Meta → Generate token
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;          // the exact phrase you put in Meta (e.g., "3dboticsbot")
+const OPENAI_KEY   = process.env.OPENAI_API_KEY || "";  // optional
+
+if (!PAGE_TOKEN || !VERIFY_TOKEN) {
+  console.warn("[BOOT] Missing PAGE_TOKEN or VERIFY_TOKEN. Set env vars in Cloud Run.");
+}
+
+// ---------- SERVER ----------
 const app = express();
 app.use(express.json({ verify: rawBodySaver }));
+function rawBodySaver(req, res, buf) { req.rawBody = buf; }
 
-// ======== ENV ========
-const PAGE_TOKEN = process.env.MESSENGER_PAGE_TOKEN || "";
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "";
-const META_APP_SECRET = process.env.META_APP_SECRET || "";
-const PORT = process.env.PORT || 8080;
+// ---------- SIMPLE DE-DUP so we don’t loop ----------
+const handledMids = new Map(); // mid -> timestamp
+const MID_TTL_MS = 5 * 60 * 1000; // keep for 5 minutes to avoid repeats
 
-// ======== Optional signature verification ========
-function rawBodySaver(req, res, buf) {
-  req.rawBody = buf;
-}
-function verifySignature(req) {
-  if (!META_APP_SECRET) return true; // skip if not configured
-  const sig = req.get("x-hub-signature-256") || "";
-  if (!sig.startsWith("sha256=")) return false;
-  const expected = "sha256=" + crypto.createHmac("sha256", META_APP_SECRET)
-    .update(req.rawBody || Buffer.from(""))
-    .digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+function seenMessage(mid) {
+  const now = Date.now();
+  // purge old
+  for (const [k, v] of handledMids.entries()) if (now - v > MID_TTL_MS) handledMids.delete(k);
+  if (!mid) return false;
+  if (handledMids.has(mid)) return true;
+  handledMids.set(mid, now);
+  return false;
 }
 
-// ======== Business context (used in replies/AI fallback) ========
+// ---------- 3DBotics knowledge (edit anytime) ----------
 const BUSINESS_CONTEXT = `
 You are the official assistant for 3DBotics (3D Designing, 3D Printing, AI-assisted coding, and AI “new age” Robotics).
-Tone: 70% casual, 30% formal. Give opinions, be concise, and be helpful. Call the user "veni" if name is known.
-If asked outside scope (politics, random trivia, unrelated personal advice), politely steer back to 3DBotics topics.
-`;
+Tone: 70% casual, 30% formal. Address the user as "veni". Give opinions when helpful; avoid neutral fluff.
 
-// ======== TECH DOJO knowledge ========
-const DOJO_OVERVIEW = `
-TECH DOJO = ongoing, dojo-style robotics training with lab gown promotions
-(white → green → blue → yellow → red → black).
+TECH DOJO (Lab-Gown Progression):
+- Gown colors: white → green → yellow → red → black.
+- Promotion requires perfect attendance for a set block (e.g., 12 sessions) AND minimum wins in dojo contests/sparring.
+- Two specialization tracks students can choose: RoboRacers or Battle KickBots.
+- Flexible attendance: kids, teens, adults can mix & match daily time slots (no fixed weekly schedule).
+- Branches can configure their own daily slots; students may attend any published slot.
 
-Promotion is earned by:
-• Attendance streaks (e.g., 12 straight sessions) and
-• Points/wins in in-class sparring/tournaments.
+COURSE LEVELS (core):
+- Basic (3D Modeling): sketch → CAD → output 3D object files. Tools often AutoCAD/Tinkercad/Fusion.
+  - Output: a 3D-printed car; includes an ESET so it can be remote-controlled at Basic.
+- MM1 (3D Printing Ops): slicing, file prep, infill/perimeter config, durability, running printers A→Z.
+  - Output: a robot arm.
+- MM2-A (Intro Robotics): Arduino/ESP32 basics; LEDs, sensors, buzzers, servos; bring prints to life.
+  - Output: a dancing robot (servos + lights + sound).
+- MM2-B (Advanced Robotics): integrate DC/TT motors, servos, LEDs, MP3, sensors → full obstacle-avoiding robot.
+- AI integration across all levels: codes (Python/C++) are generated with AI and learned through understanding.
 
-Two specialization tracks (students can switch later):
-• RoboRacers — speed/control, line-tracking, obstacles, chassis & gear ratios
-• KickBots — combat basics, torque vs speed, armor design, servo/linkage durability
+SCHEDULING MODEL:
+- Default message: “Flexible daily slots; confirm today’s times with your branch.”
+- If a branch uploads set slots, show them. Otherwise do not invent times.
 
-Core skills across all ranks:
-• 3D Modeling → 3D Printing → Assembly/Tuning → AI-assisted coding → Testing/Iteration
-• Safety checklist, tool discipline, troubleshooting logs
-
-Promotion Day: twice a month. Judges check build quality, wiring neatness, reliability,
-and code understanding (even if AI-generated). Mixed-age classes (kids ~6+, teens, adults).
-`;
-
-const DOJO_SCHEDULE_TEXT = `
-TECH DOJO — NATIONAL DEFAULT WEEKLY SCHEDULE
-Mon–Fri: 10:00–12:00 • 13:00–15:00 • 16:00–18:00 • 18:00–20:00
-Sat:     09:00–11:00 • 13:00–15:00 • 16:00–18:00
-Sun:     09:00–11:00 • 13:00–15:00 • 16:00–18:00
+FRANCHISE (short):
+- Package includes printers, toolkits, modules, training, marketing assets, AI operations platform, and lifetime support.
+- For franchise training/enrollment, contact John Villamil (COO) for next steps.
 
 Rules:
-• Flexible attendance — come to any open slot; check in at the desk.
-• Bring your logbook each session; missing a session resets the streak.
-• Promotion Day: 2× monthly (ask staff for next date).
-• Branch holidays/events may adjust times.
+- Don’t discuss politics or unrelated personal advice.
+- If a asked question is outside 3DBotics/LalaSpa scope, say you’re focused on 3DBotics and offer the main menu.
 `;
 
-// Optional per-branch overrides (fill these as you finalize local timetables)
-const DOJO_BRANCH_SCHEDULES = {
-  // "Nuvali": "Mon–Fri 1–3 • 4–6 • 6–8\nSat–Sun 9–11 • 1–3 • 4–6",
-  // "Makati": "Weekdays 10–12 • 2–4 • 6–8\nWeekends 9–11 • 1–3 • 4–6"
+// Optional: per-branch schedules you can fill later (kept simple for now)
+const SCHEDULES = {
+  // Example: "Nuvali": ["10:00–12:00", "13:00–15:00", "16:00–18:00"],
 };
-function getDojoSchedule(branch) {
-  if (!branch) return DOJO_SCHEDULE_TEXT.trim();
-  const key = branch.trim().toLowerCase();
-  const hit = Object.keys(DOJO_BRANCH_SCHEDULES).find(b => b.toLowerCase() === key);
-  return (hit ? DOJO_BRANCH_SCHEDULES[hit] : null) || DOJO_SCHEDULE_TEXT.trim();
-}
+const DEFAULT_SCHEDULE_LINE =
+  "We run flexible daily slots. Please confirm today’s times with your chosen branch.";
 
-// ======== Simple intent rules ========
+// ---------- INTENTS (tight regex, no more 'match everything') ----------
 const INTENTS = [
   {
-    name: "greet",
-    match: /^(hi|hello|hey|kumusta|good (am|pm)|yo)\b/i,
-    reply: "Hey veni! Great to see you here. What are you building today?\n\nType:\n• menu — see what I can help with\n• tech dojo — learn the dojo system\n• dojo schedule — see training times"
-  },
-  {
     name: "menu",
-    match: /(menu|help|options)$/i,
-    reply:
-      "Here’s what I can help with right now:\n• 3DBotics courses & pricing\n• Tech Dojo info & schedule\n• Franchise basics\n\nTry: “tech dojo”, “dojo schedule”, or “franchise”."
+    test: /^(menu|help|options|\?)$/i,
+    reply: () =>
+      "Here’s what I can help with right now:\n" +
+      "• “courses” – full 3DBotics levels\n" +
+      "• “tech dojo” – gown system + promotions\n" +
+      "• “schedule <branch>” – today’s time slots\n" +
+      "• “franchise” – franchise info\n" +
+      "• “contact” – how to reach us\n" +
+      "You can ask in Taglish, it’s okay."
   },
   {
-    name: "courses_basic",
-    match: /(course|class|tuition|module|3dbotics).*/i,
-    reply:
-      "3DBotics trains students in 3D Modeling, 3D Printing, and AI-assisted robotics — fast, hands-on, and project-based. Ask me about **Tech Dojo** to see our continuous promotion system."
+    name: "courses",
+    test: /\b(course|courses|class|tuition|modules?|levels?|3dbotics)\b/i,
+    reply: () =>
+      "3DBotics course ladder:\n" +
+      "• **Basic (3D Modeling)** – sketch → CAD → 3D object files. Output: 3D-printed car with ESET so it moves.\n" +
+      "• **MM1 (3D Printing Ops)** – slicing, infill/perimeter, durability, operations A→Z. Output: robot arm.\n" +
+      "• **MM2-A (Intro Robotics)** – LEDs, sensors, buzzers, servos; AI-assisted coding. Output: dancing robot.\n" +
+      "• **MM2-B (Advanced Robotics)** – DC/TT motors, servos, LEDs, MP3, sensors → obstacle-avoiding robot.\n" +
+      "AI is used across all levels (we generate code via AI, students learn to understand and modify it)."
   },
-
-  // ======= New: Tech Dojo overview =======
   {
-    name: "tech_dojo_overview",
-    match: /(tech\s*dojo|dojo|lab\s*gown|belt system|roboracers?|kickbots?)/i,
-    reply: DOJO_OVERVIEW.trim()
+    name: "techdojo",
+    test: /\b(tech\s*dojo|dojo|lab\s*gown|belt|promotion|rank)\b/i,
+    reply: () =>
+      "TECH DOJO system:\n" +
+      "• Gowns: white → green → yellow → red → black\n" +
+      "• To upgrade: perfect attendance for the block (e.g., 12 sessions) **and** a minimum number of wins in dojo contests/sparring\n" +
+      "• Tracks: RoboRacers or Battle KickBots\n" +
+      "• Flexible attendance: kids, teens, adults can mix & match daily slots (no fixed weekly schedule)\n" +
+      "Ask me: “schedule <branch>” to view today’s slots."
   },
-
-  // ======= New: Tech Dojo schedule (detects optional "in/at <branch>") =======
   {
-    name: "tech_dojo_schedule",
-    match: /(dojo).*(schedule|time|hours)|^(dojo\s*sched(ule)?|schedule)$/i,
-    reply: (text) => {
-      const m = text.match(/(?:at|in)\s+([a-zA-Z\s.\-]{3,40})$/i);
-      const branch = m ? m[1] : null;
-      const body = getDojoSchedule(branch);
-      const header = branch ? `Branch: ${branch}\n\n` : "";
-      return `${header}${body}\n\nNeed a specific day? Say “dojo schedule in <your city>”.`;
+    name: "schedule",
+    test: /\bschedule(?:\s+for)?\s+(.+)\b/i, // e.g., "schedule nuvali"
+    reply: (_text, match) => {
+      const branch = (match && match[1] || "").trim();
+      if (!branch) return DEFAULT_SCHEDULE_LINE;
+      const key = branch.toLowerCase();
+      const hit = Object.keys(SCHEDULES).find(
+        b => b.toLowerCase() === key
+      );
+      if (hit) {
+        const lines = SCHEDULES[hit].map(t => `• ${t}`).join("\n");
+        return `Today’s ${hit} slots:\n${lines}\n\nTip: arrive 10 mins early.`;
+      }
+      return `${DEFAULT_SCHEDULE_LINE}\n(Branch mentioned: “${branch}”)`;
     }
   },
-
   {
     name: "franchise",
-    match: /(franchise|magkano|package|branch)/i,
-    reply:
-      "Franchise includes printers, toolkits, training, AI web platform, and marketing assets. We support ops end-to-end so a trainable facilitator can run the dojo. Want a quick call?"
+    test: /\b(franchise|magkano|package|branch|invest|partner)\b/i,
+    reply: () =>
+      "Franchise quick view:\n" +
+      "• Includes printers, toolkits, modules, training, marketing assets, and our AI operations platform\n" +
+      "• Lifetime tech & business support\n" +
+      "• To enroll or ask pricing, ping **John Villamil (COO)** and we’ll guide you step-by-step"
+  },
+  {
+    name: "contact",
+    test: /\b(contact|call|phone|email|location|saan|reach)\b/i,
+    reply: () =>
+      "Best contact: message this page or coordinate with **John Villamil (COO)** for franchise/ops. " +
+      "For class schedules, ask “schedule <branch>”."
   }
 ];
 
-// ======== Utilities ========
-function chooseIntent(text) {
-  const t = (text || "").trim();
-  for (const intent of INTENTS) {
-    if (intent.match.test(t)) {
-      if (typeof intent.reply === "function") return intent.reply(t);
-      return intent.reply;
+// fallback: OpenAI answer constrained by our context
+async function answerWithOpenAI(userText) {
+  if (!OPENAI_KEY) return null;
+  try {
+    const prompt = [
+      { role: "system", content: BUSINESS_CONTEXT },
+      {
+        role: "user",
+        content:
+          `User asked: "${userText}". ` +
+          "Answer concisely (3–6 lines). If question is outside scope, say you’re focused on 3DBotics and offer 'menu'."
+      }
+    ];
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: prompt,
+        temperature: 0.4
+      })
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      console.warn("[OPENAI] Bad response:", res.status, t);
+      return null;
     }
-  }
-  // default steer
-  return "I can help with Tech Dojo, schedules, and franchise info. Try: “tech dojo” or “dojo schedule”.";
-}
-
-async function sendText(psid, text) {
-  if (!PAGE_TOKEN) {
-    console.error("PAGE_TOKEN missing. Set MESSENGER_PAGE_TOKEN in Cloud Run.");
-    return;
-  }
-  const url = `https://graph.facebook.com/v18.0/me/messages?access_token=${encodeURIComponent(PAGE_TOKEN)}`;
-  const body = {
-    recipient: { id: psid },
-    message: { text: text }
-  };
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  if (!r.ok) {
-    const err = await r.text().catch(() => "");
-    console.error("FB send error:", r.status, err);
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content?.trim() || null;
+  } catch (e) {
+    console.warn("[OPENAI] error", e.message);
+    return null;
   }
 }
 
-// ======== Webhook: Verify (GET) ========
+// ---------- Messenger plumbing ----------
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -178,40 +196,99 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// ======== Webhook: Receive (POST) ========
 app.post("/webhook", async (req, res) => {
   try {
-    if (!verifySignature(req)) return res.sendStatus(403);
-
     const body = req.body;
-    if (body.object !== "page") return res.sendStatus(404);
+    if (body.object !== "page") {
+      return res.sendStatus(404);
+    }
 
     for (const entry of body.entry || []) {
-      for (const event of entry.messaging || []) {
-        const sender = event.sender && event.sender.id;
-        const text =
-          (event.message && event.message.text) ||
-          (event.postback && event.postback.title) ||
-          "";
+      const events = entry.messaging || [];
+      for (const ev of events) {
+        const mid = ev.message?.mid || ev.delivery?.watermark || ev.timestamp;
+        if (seenMessage(mid)) continue; // stop loops/duplicates
 
-        if (!sender) continue;
+        const senderId = ev.sender && ev.sender.id;
+        if (!senderId) continue;
 
-        const reply = chooseIntent(text);
-        await sendText(sender, reply);
+        // Only react to text messages (ignore echoes/postbacks here)
+        const text = ev.message && !ev.message.is_echo ? ev.message.text : null;
+        if (text) {
+          await setTyping(senderId, true);
+          const reply = await routeText(text);
+          await sendText(senderId, reply);
+          await setTyping(senderId, false);
+        }
       }
     }
-    return res.sendStatus(200);
+    res.sendStatus(200);
   } catch (e) {
-    console.error("Webhook error:", e);
-    return res.sendStatus(200); // acknowledge to avoid retries
+    console.error("[WEBHOOK] error:", e);
+    res.sendStatus(200);
   }
 });
 
-// ======== Health/Root ========
-app.get("/", (req, res) => res.status(200).send("3DBotics Messenger bot is alive."));
-app.get("/healthz", (req, res) => res.status(200).send("ok"));
+// ---------- Router ----------
+async function routeText(text) {
+  const clean = (text || "").trim();
 
-// ======== Start server (Cloud Run listens on PORT) ========
+  // 1) exact menu trigger
+  if (/^(hi|hello|hey)\b/i.test(clean)) {
+    return "Hey veni! Type any of these: “courses”, “tech dojo”, “schedule <branch>”, “franchise”, “contact”, or “menu”.";
+  }
+
+  // 2) intent match (first hit wins)
+  for (const intent of INTENTS) {
+    const m = clean.match(intent.test);
+    if (m) return intent.reply(clean, m);
+  }
+
+  // 3) fallback to OpenAI (within context) else to menu
+  const ai = await answerWithOpenAI(clean);
+  if (ai) return ai;
+
+  return "I can help with Tech Dojo, schedules, franchise, and courses. Type “menu” to see options.";
+}
+
+// ---------- FB send helpers ----------
+async function sendText(psid, text) {
+  const body = {
+    recipient: { id: psid },
+    messaging_type: "RESPONSE",
+    message: { text: text.slice(0, 1999) } // safe length
+  };
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(PAGE_TOKEN)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    console.warn("[SEND] FB error:", res.status, t);
+  }
+}
+
+async function setTyping(psid, on = true) {
+  const body = {
+    recipient: { id: psid },
+    sender_action: on ? "typing_on" : "typing_off"
+  };
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(PAGE_TOKEN)}`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    // ignore typing failures
+  }
+}
+
+// ---------- START ----------
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`Bot server on :${PORT}`);
+  console.log(`[BOOT] 3DBotics bot up on :${PORT}`);
 });
