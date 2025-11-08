@@ -1,85 +1,81 @@
-// index.js
 import express from "express";
-import crypto from "node:crypto";
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
 
 const app = express();
-app.use(express.json({ verify: (req, res, buf) => (req.rawBody = buf) }));
+app.use(bodyParser.json());
 
-const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.MESSENGER_VERIFY_TOKEN;
-const PAGE_ACCESS_TOKEN = process.env.MESSENGER_PAGE_TOKEN;
-const APP_SECRET = process.env.META_APP_SECRET;
-const OPENAI = process.env.OPENAI_API_KEY;
+const PAGE_TOKEN = process.env.MESSENGER_PAGE_TOKEN;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
-// --- Messenger webhook verification (GET) ---
+// webhook verification
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
-  return res.sendStatus(403);
+
+  if (mode && token && mode === "subscribe" && token === VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  } else {
+    return res.sendStatus(403);
+  }
 });
 
-// --- Verify X-Hub-Signature-256 from Meta ---
-function isFromMeta(req) {
-  const sig = req.headers["x-hub-signature-256"];
-  if (!sig || !APP_SECRET || !req.rawBody) return false;
-  const expected = "sha256=" + crypto.createHmac("sha256", APP_SECRET).update(req.rawBody).digest("hex");
-  try { return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected)); } catch { return false; }
+// handling messages
+app.post("/webhook", async (req, res) => {
+  const body = req.body;
+
+  if (body.object === "page") {
+    for (let entry of body.entry) {
+      for (let event of entry.messaging) {
+        if (event.message && event.sender) {
+          const sender = event.sender.id;
+          const text = event.message.text || "";
+
+          // send to OpenAI
+          const replyText = await getChatGPTReply(text);
+
+          // reply to messenger
+          await callSendAPI(sender, replyText);
+        }
+      }
+    }
+    return res.sendStatus(200);
+  } else {
+    return res.sendStatus(404);
+  }
+});
+
+async function getChatGPTReply(message) {
+  const completion = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${OPENAI_KEY}`
+    },
+    body: JSON.stringify({
+      model: "gpt-5",
+      messages: [
+        { role: "system", content: "You are ChatGPT replying as if talking casually to a Filipino business owner named Veni. You are 70% casual, 30% formal, and you give your personal opinion, not neutral."},
+        { role: "user", content: message }
+      ]
+    })
+  });
+  const data = await completion.json();
+  return data.choices?.[0]?.message?.content || "I cannot think right now haha.";
 }
 
-// --- Receive message events (POST) ---
-app.post("/webhook", async (req, res) => {
-  if (!isFromMeta(req)) return res.sendStatus(403);
-
-  const messaging = req.body?.entry?.[0]?.messaging?.[0];
-  const psid = messaging?.sender?.id;
-  const text = messaging?.message?.text;
-
-  if (psid && text) {
-    const reply = await aiReply(text);
-    await sendToMessenger(psid, reply);
-  }
-
-  res.sendStatus(200);
-});
-
-// --- Send message via Messenger Send API ---
-async function sendToMessenger(psid, text) {
-  await fetch(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
+async function callSendAPI(sender, response) {
+  await fetch(`https://graph.facebook.com/v17.0/me/messages?access_token=${PAGE_TOKEN}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      recipient: { id: psid },
-      messaging_type: "RESPONSE",
-      message: { text: String(text).slice(0, 900) }
+      recipient: { id: sender },
+      message: { text: response }
     })
   });
 }
 
-// --- OpenAI Responses API (simple text) ---
-async function aiReply(userText) {
-  // Optional: moderation
-  const modRes = await fetch("https://api.openai.com/v1/moderations", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${OPENAI}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "omni-moderation-latest", input: userText })
-  });
-  const flagged = (await modRes.json())?.results?.[0]?.flagged;
-  if (flagged) return "Sorry, I can’t help with that. A human can assist you.";
-
-  const system = "You are a friendly 3DBotics/LalaSpa assistant. Be concise, helpful, and offer 'Talk to a human' when needed.";
-  const r = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${OPENAI}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "gpt-5-mini",
-      input: [{ role: "system", content: system }, { role: "user", content: userText }]
-    })
-  });
-  const data = await r.json();
-  return data?.output_text || "Hi! How can I help today?";
-}
-
-app.get("/", (req, res) => res.send("OK"));
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log("server running on port", PORT));
