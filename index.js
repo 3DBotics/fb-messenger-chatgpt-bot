@@ -1,20 +1,20 @@
-// index.js — 3DBotics Messenger Bot (GPT-4o conversational + guardrails)
-// Runs on Cloud Run buildpacks
+// index.js — 3DBotics Messenger Bot (GPT-4o conversational + smart rule intents)
+// © 3DBotics 2025 — runs on Cloud Run buildpacks
 
 import express from "express";
 import crypto from "crypto";
 
 // ====== ENV ======
 const PAGE_TOKEN   = process.env.MESSENGER_PAGE_TOKEN;
-const VERIFY_TOKEN = process.env.MESSENGER_VERIFY_TOKEN;     // e.g., "3dboticsbot"
+const VERIFY_TOKEN = process.env.MESSENGER_VERIFY_TOKEN;
 const APP_SECRET   = process.env.META_APP_SECRET;
-const OPENAI_KEY   = process.env.OPENAI_API_KEY;             // <-- add in Cloud Run
+const OPENAI_KEY   = process.env.OPENAI_API_KEY;
 
 if (!PAGE_TOKEN || !VERIFY_TOKEN || !APP_SECRET) {
-  console.error("❌ Missing FB envs");
+  console.error("❌ Missing Facebook environment variables");
 }
 
-// ====== STATIC BUSINESS FACTS (single source of truth) ======
+// ====== STATIC BUSINESS FACTS ======
 const FACTS = {
   brand: "3DBotics",
   program: "Tech Dojo",
@@ -65,7 +65,7 @@ const FACTS = {
       "2) 40% after target opening set (order equipment ~45 days before opening).",
       "3) Final 50% two weeks before delivery (one week before opening).",
       "FREE training runs between milestones.",
-      "CORE-30 perks: lifetime no royalty & no renewal, core-group status, VIP benefits, big discounts/freebies. (28 taken; last slots going.)"
+      "CORE-30 perks: lifetime no royalty & no renewal, core-group status, VIP benefits."
     ],
     multiBiz: [
       "Tech Playschool (3D Printing + Robotics-AI)",
@@ -77,34 +77,21 @@ const FACTS = {
       "Target monthly potential: ₱300,000+ (execution-dependent)."
     ]
   },
-  // Default branch (Nuvali) first, then key branches; add more anytime.
   branches: [
-    { city: "Nuvali (Sta. Rosa Laguna) — DEFAULT", phone: "0985 383 3878", addr: "2F Laguna Central (near Shopwise), Sta. Rosa, Laguna" },
+    { city: "Nuvali (Sta. Rosa Laguna)", phone: "0985 383 3878", addr: "2F Laguna Central, Sta. Rosa" },
     { city: "Makati City", phone: "0917 672 6871", addr: "Unit 127, Mile Long Bldg., Legazpi Village" },
-    { city: "Imus City (Cavite)", phone: "0956 895 0278", addr: "Robofab 3DBotics Imus, 189 RCJ Commercial Bldg., Bayan Luma 1" },
+    { city: "Imus City (Cavite)", phone: "0956 895 0278", addr: "RCJ Commercial Bldg., Bayan Luma 1" },
     { city: "Las Piñas", phone: "0998 530 9437", addr: "Unit 115 Vatican Bldg., BF Resort" },
     { city: "Bacoor (Cavite)", phone: "0917 872 3189", addr: "2F Main Square Mall, Bayanan" },
-    { city: "Cabuyao City", phone: "0920 276 1204", addr: "Unit 3C RLI Bldg., Southpoint, Banay-Banay" },
+    { city: "Cabuyao City", phone: "0920 276 1204", addr: "Unit 3C RLI Bldg., Banay-Banay" },
     { city: "Los Baños", phone: "0936 213 9211", addr: "Batong Malake (UPLB area)" },
     { city: "Mandaluyong", phone: "0917 578 1611", addr: "6F MG Tower II, Shaw Blvd." },
     { city: "Ortigas", phone: "0918 964 4285", addr: "GF Goldloop Towers, Ortigas Center" },
-    { city: "Taguig", phone: "0917 557 2078 / 0927 647 8955", addr: "2F #72 MRT Ave., Central Signal Village" },
-    { city: "Pasay City", phone: "0929 374 3932 / 0976 149 2525", addr: "722 P. Santos St., Brgy. 169, Malibay" },
-    { city: "San Fernando (Pampanga)", phone: "0956 886 9739", addr: "#7 Residenza Townhomes, Don Ramon Ave., San Agustin" },
-    { city: "San Pablo City", phone: "0945 289 0343", addr: "Tech Wiz Club-3DBotics, 4 Lt. R. Brion St." },
-    { city: "San Pedro (Laguna)", phone: "0993 728 6308", addr: "28 Amorsolo, Brgy. Chrysanthemum" },
-    { city: "Sto. Tomas (Batangas)", phone: "0945 289 0343", addr: "#19 A. Bonifacio St., Poblacion 2" },
-    { city: "Tarlac", phone: "0943 134 9368", addr: "Bayanihan Institute, St. Mary’s Subd., Matatalaib" },
-    { city: "Urdaneta City", phone: "0908 224 6367", addr: "3F RjR Bldg., San Vicente" },
-    { city: "Bacolod", phone: "0919 065 2600", addr: "2F Mayfair Plaza, 12th Lacson St." },
-    { city: "Bohol (Tagbilaran)", phone: "0905 225 1088", addr: "G/F Konnichiwa Bldg., J.B. Gallares St., Dampas" },
-    { city: "Tacloban", phone: "0917 850 2008", addr: "GF Primark Town Center, Caibaan" },
-    { city: "Ormoc City", phone: "0969 648 2744", addr: "UG 113, Chinatown Eastgate, Lilia Ave., Brgy. Cogon" },
-    { city: "Cagayan de Oro", phone: "0976 176 5241", addr: "Room 3D, H Building, Masterson Miles, Upper Carmen" }
+    { city: "Taguig", phone: "0917 557 2078 / 0927 647 8955", addr: "2F #72 MRT Ave., Central Signal" }
   ]
 };
 
-// ====== FB app ======
+// ====== APP ======
 const app = express();
 app.use(express.json({ verify: verifySignature }));
 
@@ -117,11 +104,10 @@ function verifySignature(req, res, buf) {
   }
 }
 
-// anti-flood + chunking
+// ====== Anti-flood + Chunking ======
 const handledMIDs = new Map();
 const MID_TTL_MS = 10 * 60 * 1000;
 const CHUNK = 900;
-
 function dedupe(mid) {
   const now = Date.now();
   for (const [k, t] of handledMIDs) if (now - t > MID_TTL_MS) handledMIDs.delete(k);
@@ -138,64 +124,104 @@ async function sendText(psid, text) {
       recipient: { id: psid },
       message: { text: text.slice(i, i + CHUNK) }
     };
-    await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
   }
 }
 
-// ====== RULE FALLBACK (short canned replies) ======
+// ====== Text Canonicalizer (Synonym Normalizer) ======
+function canonicalize(text = "") {
+  const t = text.toLowerCase().trim();
+
+  if (/(hiring|job|trabaho|apply|resume|cv)/.test(t)) return { t, gate: "JOBS" };
+
+  const openBranchSyn = /(open(ing)?|start|setup|set up|mag[- ]?open|magbukas)\s+(a\s+)?branch/;
+  const bringToCitySyn = /(bring|open)\s+(3dbotics|a\s+branch)\s+(to|in|sa)\s+([a-z .'-]+)/;
+  if (openBranchSyn.test(t)) return { t: t.replace(openBranchSyn, "franchise"), gate: "FRANCHISE" };
+  if (bringToCitySyn.test(t)) return { t: t.replace(bringToCitySyn, "franchise in $4"), gate: "FRANCHISE" };
+
+  const otherFrSyn = /(franchise|franchising|mag[- ]?franchise|partner with 3dbotics|become a partner)/;
+  if (otherFrSyn.test(t)) return { t: t.replace(otherFrSyn, "franchise"), gate: "FRANCHISE" };
+
+  return { t, gate: null };
+}
+
+// ====== RULE ENGINE ======
 function ruleReply(text) {
-  const t = (text || "").toLowerCase();
+  const { t, gate } = canonicalize(text || "");
 
   if (/(tuition|price|magkano|3995|3,?995)/.test(t)) {
     return `${FACTS.tuition}\nDaily slots: ${FACTS.slots.join(" • ")}\n${FACTS.cta.enroll}`;
   }
+
   if (/(material|kit|uniform|labgown|consumable|bayad)/.test(t)) {
     return `${FACTS.materials.onetime}\n${FACTS.materials.monthly}\n${FACTS.cta.enroll}`;
   }
+
   if (/(workshop|teacher|cert)/.test(t)) {
     return `Teacher Certification — ${FACTS.teacherWorkshop.price}\n${FACTS.cta.workshop}`;
   }
-  if (/(franchise\b|package)/.test(t)) {
-    return `${FACTS.franchise.opt1}\n\n${FACTS.franchise.opt2}\n\n${FACTS.franchise.steps.join("\n")}`;
+
+  // Unified Franchise or "Open a Branch"
+  if (gate === "FRANCHISE" || /(franchise|package)/.test(t)) {
+    const m = t.match(/franchise(?:\s+in|\s+sa)\s+([a-z .'-]+)/);
+    const city = m && m[1] ? m[1].trim() : null;
+    if (city) {
+      const hit = FACTS.branches.find(b => b.city.toLowerCase().includes(city));
+      const cityLine = hit
+        ? `\nWe can reserve **${hit.city}** now (one branch per city).`
+        : `\nWe can reserve **${city}** now (one branch per city).`;
+      return `${FACTS.franchise.opt1}\n\n${FACTS.franchise.opt2}\n\n${FACTS.franchise.steps.join("\n")}${cityLine}\n${FACTS.cta.franchise}`;
+    }
+    return `${FACTS.franchise.opt1}\n\n${FACTS.franchise.opt2}\n\n${FACTS.franchise.steps.join("\n")}\n${FACTS.cta.franchise}`;
   }
+
   if (/franchise step|paano mag start/.test(t)) {
     return FACTS.franchise.steps.join("\n") + `\n${FACTS.cta.franchise}`;
   }
+
+  // Branch info lookup
   if (/branch\s+\w+/.test(t)) {
     const m = t.match(/branch\s+(.+)/i);
     const city = m && m[1] ? m[1].trim() : "";
     const hit = FACTS.branches.find(b => b.city.toLowerCase().includes(city));
     if (hit) return `${hit.city}\nContact: ${hit.phone}\nAddress: ${hit.addr}\n${FACTS.cta.enroll}`;
   }
+
   if (/(branch|address|location|saan|where)/.test(t)) {
-    const list = FACTS.branches.slice(0, 10).map(b => `• ${b.city} — ${b.phone}`).join("\n");
+    const list = FACTS.branches
+      .slice(0, 10)
+      .map(b => `• ${b.city} — ${b.phone}`)
+      .join("\n");
     return `Branches (sample):\n${list}\nAsk: “branch Makati” or “branch Nuvali”.`;
   }
 
-  return null; // let GPT handle it
+  return null; // pass to GPT
 }
 
 // ====== GPT-4o ======
 async function gptReply(userText) {
   if (!OPENAI_KEY) return null;
 
-  const systemPrompt =
-`You are the official ${FACTS.brand} Messenger assistant.
+  const systemPrompt = `
+You are the official ${FACTS.brand} Messenger assistant.
 Tone: warm, concise, persuasive, 70% casual / 30% formal. Address the user as "veni".
-Always answer in ≤ 900 characters, 1 message bubble. No lists unless helpful.
-Stay strictly inside this knowledge (do not invent):
+Stay factual and limited to this data — do not invent.
 
 PROGRAM
 - ${FACTS.positioning}
 - Tuition: ${FACTS.tuition}
 - Materials: ${FACTS.materials.onetime} | ${FACTS.materials.monthly}
-- Daily time slots: ${FACTS.slots.join(" • ")}
+- Time slots: ${FACTS.slots.join(" • ")}
 - Weekly tracks: ${FACTS.tracks.join(" / ")}
 
 CTAs
-- Enroll (Nuvali default): ${FACTS.cta.enroll}
+- Enroll: ${FACTS.cta.enroll}
 - Franchise: ${FACTS.cta.franchise}
-- Teacher Workshop: ${FACTS.cta.workshop}
+- Workshop: ${FACTS.cta.workshop}
 
 FRANCHISE
 - ${FACTS.franchise.opt1}
@@ -203,14 +229,14 @@ FRANCHISE
 - Steps: ${FACTS.franchise.steps.join(" ")}
 - Multi-business: ${FACTS.franchise.multiBiz.join(" | ")}
 
-BRANCHES (partial):
-${FACTS.branches.map(b=>`- ${b.city} | ${b.phone} | ${b.addr}`).join("\n")}
+BRANCHES
+${FACTS.branches.map(b => `- ${b.city} | ${b.phone} | ${b.addr}`).join("\n")}
 
 Behavior rules:
-- If user asks “near Nuvali” or Laguna, answer with Nuvali contact/address first.
-- If user asks for materials or hidden costs, always mention ₱1,100 kit + ~₱700/month consumables.
-- If user asks about franchise, include one CTA line.
-- Keep answers friendly and human, but tight.`;
+- Treat “open a branch”, “start/setup a branch”, or Tagalog equivalents (mag-open/magbukas ng branch), and “open 3DBotics in <city>” as FRANCHISING. Always respond with the franchise packages + CTA.
+- If user mentions a city, show that branch contact if available.
+- Always end with the most relevant CTA line.
+`;
 
   const payload = {
     model: "gpt-4o",
@@ -235,13 +261,12 @@ Behavior rules:
     console.error("OpenAI error", await resp.text());
     return null;
   }
+
   const data = await resp.json();
-  const text = data.choices?.[0]?.message?.content?.trim();
-  return text || null;
+  return data.choices?.[0]?.message?.content?.trim() || null;
 }
 
 // ====== WEBHOOKS ======
-// Verify
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -250,7 +275,6 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Receive
 app.post("/webhook", async (req, res) => {
   const body = req.body;
   if (body.object !== "page") return res.sendStatus(404);
@@ -259,31 +283,37 @@ app.post("/webhook", async (req, res) => {
     const event = entry.messaging && entry.messaging[0];
     if (!event) continue;
 
-    const mid    = event.message && event.message.mid;
+    const mid = event.message && event.message.mid;
     if (mid && dedupe(mid)) continue;
 
     const sender = event.sender && event.sender.id;
-    const text   = event.message && event.message.text;
+    const text = event.message && event.message.text;
 
     if (sender && text) {
       try {
-        // 1) try precise rule (fast, deterministic)
+        // Hiring filter first
+        if (/(hiring|job|trabaho|apply|resume|cv)/i.test(text)) {
+          await sendText(sender, "We’re not hiring through this bot right now. For opportunities, message your nearest 3DBotics branch or email careers@3dbotics.ph.");
+          continue;
+        }
+
+        // Rule-based reply
         const ruled = ruleReply(text);
         if (ruled) { await sendText(sender, ruled); continue; }
 
-        // 2) otherwise GPT-4o conversational
+        // GPT-4o fallback
         const gen = await gptReply(text);
-        await sendText(sender, gen || "I can help with Tech Dojo, schedule, tuition, materials, branches, and franchise. Try “schedule” or “franchise”.");
+        await sendText(sender, gen || "I can help with Tech Dojo, schedules, tuition, materials, branches, and franchise details. Try typing “franchise” or “schedule”.");
       } catch (e) {
-        console.error("send error", e);
+        console.error("Send error:", e);
       }
     }
   }
   res.sendStatus(200);
 });
 
-// Health
-app.get("/", (_req, res) => res.status(200).send("3DBotics Tech Dojo bot (GPT-4o) up"));
+// ====== HEALTH CHECK ======
+app.get("/", (_req, res) => res.status(200).send("🤖 3DBotics Messenger Bot (GPT-4o) running smoothly."));
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log("Bot listening on " + PORT));
+app.listen(PORT, () => console.log("✅ 3DBotics Bot listening on port " + PORT));
