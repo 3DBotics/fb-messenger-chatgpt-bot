@@ -1,5 +1,5 @@
-// index.js — 3DBotics Messenger Bot (GPT-4o conversational + smart rule intents)
-// © 3DBotics 2025 — runs on Cloud Run buildpacks
+// index.js — 3DBotics Messenger Bot (GPT-4o + smart franchise intent)
+// Cloud Run buildpacks ready
 
 import express from "express";
 import crypto from "crypto";
@@ -11,7 +11,7 @@ const APP_SECRET   = process.env.META_APP_SECRET;
 const OPENAI_KEY   = process.env.OPENAI_API_KEY;
 
 if (!PAGE_TOKEN || !VERIFY_TOKEN || !APP_SECRET) {
-  console.error("❌ Missing Facebook environment variables");
+  console.error("❌ Missing FB envs");
 }
 
 // ====== STATIC BUSINESS FACTS ======
@@ -78,16 +78,16 @@ const FACTS = {
     ]
   },
   branches: [
-    { city: "Nuvali (Sta. Rosa Laguna)", phone: "0985 383 3878", addr: "2F Laguna Central, Sta. Rosa" },
+    { city: "Nuvali (Sta. Rosa Laguna) — DEFAULT", phone: "0985 383 3878", addr: "2F Laguna Central (near Shopwise), Sta. Rosa, Laguna" },
     { city: "Makati City", phone: "0917 672 6871", addr: "Unit 127, Mile Long Bldg., Legazpi Village" },
-    { city: "Imus City (Cavite)", phone: "0956 895 0278", addr: "RCJ Commercial Bldg., Bayan Luma 1" },
+    { city: "Imus City (Cavite)", phone: "0956 895 0278", addr: "189 RCJ Commercial Bldg., Bayan Luma 1" },
     { city: "Las Piñas", phone: "0998 530 9437", addr: "Unit 115 Vatican Bldg., BF Resort" },
     { city: "Bacoor (Cavite)", phone: "0917 872 3189", addr: "2F Main Square Mall, Bayanan" },
-    { city: "Cabuyao City", phone: "0920 276 1204", addr: "Unit 3C RLI Bldg., Banay-Banay" },
+    { city: "Cabuyao City", phone: "0920 276 1204", addr: "Unit 3C RLI Bldg., Southpoint, Banay-Banay" },
     { city: "Los Baños", phone: "0936 213 9211", addr: "Batong Malake (UPLB area)" },
     { city: "Mandaluyong", phone: "0917 578 1611", addr: "6F MG Tower II, Shaw Blvd." },
     { city: "Ortigas", phone: "0918 964 4285", addr: "GF Goldloop Towers, Ortigas Center" },
-    { city: "Taguig", phone: "0917 557 2078 / 0927 647 8955", addr: "2F #72 MRT Ave., Central Signal" }
+    { city: "Taguig", phone: "0917 557 2078 / 0927 647 8955", addr: "2F #72 MRT Ave., Central Signal Village" }
   ]
 };
 
@@ -124,53 +124,78 @@ async function sendText(psid, text) {
       recipient: { id: psid },
       message: { text: text.slice(i, i + CHUNK) }
     };
-    await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+    await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   }
 }
 
-// ====== Text Canonicalizer (Synonym Normalizer) ======
-function canonicalize(text = "") {
-  const t = text.toLowerCase().trim();
+// ====== INTENT HELPERS ======
+// Broad verb set for "open/start a branch"
+const VERB_OPEN = /(open|opening|start|setup|set up|establish|build|launch|own|operate|magtayo|mag[- ]?open|mag[- ]?bukas|magbukas|mag-open|mag open)/;
+const FRANCHISE_WORD = /(franchise|franchising|mag[- ]?franchise)/;
 
-  if (/(hiring|job|trabaho|apply|resume|cv)/.test(t)) return { t, gate: "JOBS" };
+// Detect franchising intent even with words between "open" and "branch"
+function isFranchiseIntent(t) {
+  const text = t.toLowerCase();
 
-  const openBranchSyn = /(open(ing)?|start|setup|set up|mag[- ]?open|magbukas)\s+(a\s+)?branch/;
-  const bringToCitySyn = /(bring|open)\s+(3dbotics|a\s+branch)\s+(to|in|sa)\s+([a-z .'-]+)/;
-  if (openBranchSyn.test(t)) return { t: t.replace(openBranchSyn, "franchise"), gate: "FRANCHISE" };
-  if (bringToCitySyn.test(t)) return { t: t.replace(bringToCitySyn, "franchise in $4"), gate: "FRANCHISE" };
+  // obvious franchise words
+  if (FRANCHISE_WORD.test(text)) return true;
 
-  const otherFrSyn = /(franchise|franchising|mag[- ]?franchise|partner with 3dbotics|become a partner)/;
-  if (otherFrSyn.test(t)) return { t: t.replace(otherFrSyn, "franchise"), gate: "FRANCHISE" };
+  // verb + branch (allow up to 5 filler words between)
+  if (VERB_OPEN.test(text) && /branch/.test(text)) return true;
 
-  return { t, gate: null };
+  // verb + 3dbotics without 'branch'
+  if (VERB_OPEN.test(text) && /(3dbotics)/.test(text)) return true;
+
+  // phrases like "I want my own branch"
+  if (/(my\s+own\s+branch|own\s+branch)/.test(text)) return true;
+
+  // tagalog patterns: "paano magtayo/magbukas ng branch"
+  if (/(paano|gusto|pwede).*(magtayo|magbukas|mag open).*(branch|3dbotics)/.test(text)) return true;
+
+  return false;
+}
+
+// Detect branch locator (when user wants addresses/list, not franchise)
+function isBranchLocator(t) {
+  const text = t.toLowerCase();
+  if (/branch\s+\w+/.test(text)) return true; // "branch Makati"
+  if (/(address|location|saan|where|near|malapit|branches|branch list)/.test(text)) return true;
+  return false;
+}
+
+function extractCity(t) {
+  const m1 = t.match(/(?:in|sa)\s+([a-z .'-]+)/i);
+  if (m1 && m1[1]) return m1[1].trim();
+  const m2 = t.match(/branch\s+([a-z .'-]+)/i);
+  if (m2 && m2[1]) return m2[1].trim();
+  return null;
 }
 
 // ====== RULE ENGINE ======
 function ruleReply(text) {
-  const { t, gate } = canonicalize(text || "");
+  const t = (text || "").toLowerCase().trim();
 
+  // Hiring filter
+  if (/(hiring|job|trabaho|apply|resume|cv)/.test(t)) {
+    return "We’re not hiring through this bot right now. For opportunities, message your nearest 3DBotics branch or email careers@3dbotics.ph.";
+  }
+
+  // Tuition / materials / workshop
   if (/(tuition|price|magkano|3995|3,?995)/.test(t)) {
     return `${FACTS.tuition}\nDaily slots: ${FACTS.slots.join(" • ")}\n${FACTS.cta.enroll}`;
   }
-
   if (/(material|kit|uniform|labgown|consumable|bayad)/.test(t)) {
     return `${FACTS.materials.onetime}\n${FACTS.materials.monthly}\n${FACTS.cta.enroll}`;
   }
-
   if (/(workshop|teacher|cert)/.test(t)) {
     return `Teacher Certification — ${FACTS.teacherWorkshop.price}\n${FACTS.cta.workshop}`;
   }
 
-  // Unified Franchise or "Open a Branch"
-  if (gate === "FRANCHISE" || /(franchise|package)/.test(t)) {
-    const m = t.match(/franchise(?:\s+in|\s+sa)\s+([a-z .'-]+)/);
-    const city = m && m[1] ? m[1].trim() : null;
+  // ✅ Franchise intent (captures “open my own branch”, Taglish, etc.)
+  if (isFranchiseIntent(t)) {
+    const city = extractCity(t);
     if (city) {
-      const hit = FACTS.branches.find(b => b.city.toLowerCase().includes(city));
+      const hit = FACTS.branches.find(b => b.city.toLowerCase().includes(city.toLowerCase()));
       const cityLine = hit
         ? `\nWe can reserve **${hit.city}** now (one branch per city).`
         : `\nWe can reserve **${city}** now (one branch per city).`;
@@ -179,27 +204,25 @@ function ruleReply(text) {
     return `${FACTS.franchise.opt1}\n\n${FACTS.franchise.opt2}\n\n${FACTS.franchise.steps.join("\n")}\n${FACTS.cta.franchise}`;
   }
 
+  // Explicit steps
   if (/franchise step|paano mag start/.test(t)) {
     return FACTS.franchise.steps.join("\n") + `\n${FACTS.cta.franchise}`;
   }
 
-  // Branch info lookup
-  if (/branch\s+\w+/.test(t)) {
+  // 📍 Branch locator (only when truly looking for addresses/list)
+  if (isBranchLocator(t)) {
+    // “branch Makati”
     const m = t.match(/branch\s+(.+)/i);
-    const city = m && m[1] ? m[1].trim() : "";
-    const hit = FACTS.branches.find(b => b.city.toLowerCase().includes(city));
-    if (hit) return `${hit.city}\nContact: ${hit.phone}\nAddress: ${hit.addr}\n${FACTS.cta.enroll}`;
-  }
-
-  if (/(branch|address|location|saan|where)/.test(t)) {
-    const list = FACTS.branches
-      .slice(0, 10)
-      .map(b => `• ${b.city} — ${b.phone}`)
-      .join("\n");
+    if (m && m[1]) {
+      const city = m[1].trim();
+      const hit = FACTS.branches.find(b => b.city.toLowerCase().includes(city.toLowerCase()));
+      if (hit) return `${hit.city}\nContact: ${hit.phone}\nAddress: ${hit.addr}\n${FACTS.cta.enroll}`;
+    }
+    const list = FACTS.branches.slice(0, 10).map(b => `• ${b.city} — ${b.phone}`).join("\n");
     return `Branches (sample):\n${list}\nAsk: “branch Makati” or “branch Nuvali”.`;
   }
 
-  return null; // pass to GPT
+  return null; // let GPT handle it
 }
 
 // ====== GPT-4o ======
@@ -209,7 +232,7 @@ async function gptReply(userText) {
   const systemPrompt = `
 You are the official ${FACTS.brand} Messenger assistant.
 Tone: warm, concise, persuasive, 70% casual / 30% formal. Address the user as "veni".
-Stay factual and limited to this data — do not invent.
+Answer in ≤ 900 characters. Stick to facts below.
 
 PROGRAM
 - ${FACTS.positioning}
@@ -233,9 +256,10 @@ BRANCHES
 ${FACTS.branches.map(b => `- ${b.city} | ${b.phone} | ${b.addr}`).join("\n")}
 
 Behavior rules:
-- Treat “open a branch”, “start/setup a branch”, or Tagalog equivalents (mag-open/magbukas ng branch), and “open 3DBotics in <city>” as FRANCHISING. Always respond with the franchise packages + CTA.
-- If user mentions a city, show that branch contact if available.
-- Always end with the most relevant CTA line.
+- Treat any “open/start/setup/launch/own/magtayo/magbukas … + (branch or 3DBotics)” as FRANCHISING; reply with franchise packages + steps + CTA. If a city is present, mention reservation for that city.
+- Only return the branch list when the user is clearly asking for locations (where/saan/address/branch <city>/near me).
+- If user asks costs/materials, always include ₱1,100 kit + ~₱700/month consumables.
+- End with the most relevant CTA line.
 `;
 
   const payload = {
@@ -261,7 +285,6 @@ Behavior rules:
     console.error("OpenAI error", await resp.text());
     return null;
   }
-
   const data = await resp.json();
   return data.choices?.[0]?.message?.content?.trim() || null;
 }
@@ -283,37 +306,29 @@ app.post("/webhook", async (req, res) => {
     const event = entry.messaging && entry.messaging[0];
     if (!event) continue;
 
-    const mid = event.message && event.message.mid;
+    const mid    = event.message && event.message.mid;
     if (mid && dedupe(mid)) continue;
 
     const sender = event.sender && event.sender.id;
-    const text = event.message && event.message.text;
+    const text   = event.message && event.message.text;
 
     if (sender && text) {
       try {
-        // Hiring filter first
-        if (/(hiring|job|trabaho|apply|resume|cv)/i.test(text)) {
-          await sendText(sender, "We’re not hiring through this bot right now. For opportunities, message your nearest 3DBotics branch or email careers@3dbotics.ph.");
-          continue;
-        }
-
-        // Rule-based reply
         const ruled = ruleReply(text);
         if (ruled) { await sendText(sender, ruled); continue; }
 
-        // GPT-4o fallback
         const gen = await gptReply(text);
-        await sendText(sender, gen || "I can help with Tech Dojo, schedules, tuition, materials, branches, and franchise details. Try typing “franchise” or “schedule”.");
+        await sendText(sender, gen || "I can help with Tech Dojo, schedules, tuition, materials, branches, and franchise details. Try “franchise” or “schedule”.");
       } catch (e) {
-        console.error("Send error:", e);
+        console.error("send error", e);
       }
     }
   }
   res.sendStatus(200);
 });
 
-// ====== HEALTH CHECK ======
-app.get("/", (_req, res) => res.status(200).send("🤖 3DBotics Messenger Bot (GPT-4o) running smoothly."));
+// ====== HEALTH ======
+app.get("/", (_req, res) => res.status(200).send("🤖 3DBotics Tech Dojo bot (GPT-4o) up"));
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log("✅ 3DBotics Bot listening on port " + PORT));
+app.listen(PORT, () => console.log("Bot listening on " + PORT));
